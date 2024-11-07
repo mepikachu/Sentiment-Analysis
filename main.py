@@ -1,6 +1,9 @@
 import sqlite3
 import joblib
-from tensorflow.keras.models import load_model
+import tensorflow.keras.models as models
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout
+from tensorflow.keras.preprocessing.sequence import pad_sequences
 from sklearn.feature_extraction.text import TfidfVectorizer
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -9,7 +12,7 @@ import reddit
 def load_model(model_name:str):
     # load the model to make the predictions
     #model = joblib.load(model_name)
-    model = load_model(model_name)
+    model = models.load_model(model_name)
     return model
 
 def load_database():
@@ -20,6 +23,7 @@ def load_database():
                     CREATE TABLE IF NOT EXISTS classifications(
                         postid INTEGER PRIMARY KEY AUTOINCREMENT,
                         total_comments INT DEFAULT 0,
+                        negative_comments INT DEFAULT 0,
                         toxic INT DEFAULT 0,
                         severe_toxic INT DEFAULT 0,
                         obscene INT DEFAULT 0,
@@ -67,25 +71,42 @@ def predictUpdate(conn, cursor, model, vectorizer, postid:int, comment_text:str)
     # predict the labels and update in the database
     #comment_vector = vectorizer.transform([comment_text])
     #prediction = model.predict(comment_vector)[0]
-    comment_seq = tokenizer.texts_to_sequences([comment_test])
+    max_words = 20000  # Vocabulary size
+    max_len = 100      # Maximum length of each comment
+    comment_seq = tokenizer.texts_to_sequences([comment_text])
     comment_pad = pad_sequences(comment_seq, maxlen=max_len)
     prediction = ((model.predict(comment_pad) > 0.5).astype(int))[0]
-    cursor.execute(f"""
-                   UPDATE classifications SET total_comments = total_comments + 1,
-                                             toxic = toxic + {prediction[0]}, 
-                                             severe_toxic = severe_toxic + {prediction[1]},
-                                             obscene = obscene + {prediction[2]},
-                                             threat = threat + {prediction[3]},
-                                             insult = insult + {prediction[4]},
-                                             identity_hate = identity_hate + {prediction[5]}
-                    WHERE postid = {postid};                   
-                   """)
-    conn.commit()
-
+    isneg = False
     for pred in prediction:
         if (pred == 1):
-            return 1
-    return 0
+            isneg = True
+            break
+
+    if (isneg == True):
+        cursor.execute(f"""
+                       UPDATE classifications SET total_comments = total_comments + 1,
+                                                 negative_comments = negative_comments + 1,
+                                                 toxic = toxic + {prediction[0]}, 
+                                                 severe_toxic = severe_toxic + {prediction[1]},
+                                                 obscene = obscene + {prediction[2]},
+                                                 threat = threat + {prediction[3]},
+                                                 insult = insult + {prediction[4]},
+                                                 identity_hate = identity_hate + {prediction[5]}
+                        WHERE postid = {postid};                   
+                       """)
+    else:
+        cursor.execute(f"""
+                       UPDATE classifications SET total_comments = total_comments + 1,
+                                                 toxic = toxic + {prediction[0]}, 
+                                                 severe_toxic = severe_toxic + {prediction[1]},
+                                                 obscene = obscene + {prediction[2]},
+                                                 threat = threat + {prediction[3]},
+                                                 insult = insult + {prediction[4]},
+                                                 identity_hate = identity_hate + {prediction[5]}
+                        WHERE postid = {postid};                   
+                       """)
+    conn.commit()
+    return isneg
 
 def generate_charts(conn, cursor, postid: int):
     # Fetch the classification data for the postid
@@ -98,7 +119,7 @@ def generate_charts(conn, cursor, postid: int):
     
     print(result)
     
-    labels = ['toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']
+    labels = ['negative_comments', 'toxic', 'severe_toxic', 'obscene', 'threat', 'insult', 'identity_hate']
     total_comments = result[1]  # Get the total_comment count
     counts = result[2:]  # Exclude postid and total_comments
     
@@ -128,11 +149,13 @@ negative_comments = {}
 posts = reddit.getData(SUBREDDITS = ['insanepeoplefacebook'])
 for post in posts:
     id = insertEntry(conn, cursor, post['title'])
-    negative_comments[id] = {}
+    negative_comments[id] = []
     for comment in post['comments']:
-        pred = predictUpdate(conn, cursor, model, tokenizer, id, comment)
-        if (pred == 1):
-            (negative_comments[id]).append(comment)
+        isneg = predictUpdate(conn, cursor, model, tokenizer, id, comment)
+        if (isneg == True):
+            negative_comments[id].append(comment)
+            
+joblib.dump(negative_comments, 'results/negative_comments.pkl')
 
 for i in range(1, len(posts)+1):
     generate_charts(conn, cursor, postid=i)
